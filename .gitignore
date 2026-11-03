@@ -1,0 +1,15 @@
+# Raw/processed data (large, not for version control)
+data/
+
+# Python virtual environment
+.venv/
+
+# Secrets (database password etc.)
+.env
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# Jupyter checkpoints
+.ipynb_checkpoints/

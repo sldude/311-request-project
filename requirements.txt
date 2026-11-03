@@ -1,0 +1,19 @@
+# Data processing
+pandas
+pyarrow
+duckdb
+# Geospatial
+geopandas
+pyogrio
+shapely
+pyproj
+# Database
+psycopg[binary]
+sqlalchemy
+geoalchemy2
+# Config / secrets
+python-dotenv
+# API (later stage)
+requests
+# Exploration
+jupyter
