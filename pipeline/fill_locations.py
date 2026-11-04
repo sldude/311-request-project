@@ -5,6 +5,7 @@ Output: data/interim/located.parquet  (same rows + location_source column)
 
 How it works
 ------------
+0. Treat placeholder coordinates (whole degrees, e.g. 39.0, -77.0) as missing.
 1. Build a cleaned matching key for every address:
    - keep the street part (before the first comma), uppercase,
      drop punctuation, squeeze spaces
@@ -74,6 +75,7 @@ def street_key_sql(col: str) -> str:
 def build_sql() -> str:
     zip_from_address = r"nullif(regexp_extract(address, '(\d{5})(-\d{4})?\s*$', 1), '')"
     zip_from_column = r"CASE WHEN regexp_matches(zip_code, '^\d{5}') THEN left(zip_code, 5) END"
+    placeholder = "(latitude = round(latitude) AND longitude = round(longitude))"
 
     # Approximate distance in meters between two nearby lat/lon points
     # (flat-earth approximation; accurate enough at city scale).
@@ -97,11 +99,19 @@ def build_sql() -> str:
         """
 
     return f"""
-    WITH keyed AS (
+    WITH cleaned AS (
+        -- Placeholder coordinates (whole degrees, e.g. 39.0, -77.0; mostly 2018)
+        -- are not real locations: treat them as missing.
+        SELECT * REPLACE (
+            CASE WHEN {placeholder} THEN NULL ELSE latitude END AS latitude,
+            CASE WHEN {placeholder} THEN NULL ELSE longitude END AS longitude)
+        FROM '{IN_PATH.as_posix()}'
+    ),
+    keyed AS (
         SELECT *,
                {street_key_sql('address')} AS street_key,
                coalesce({zip_from_address}, {zip_from_column}) AS zip5
-        FROM '{IN_PATH.as_posix()}'
+        FROM cleaned
     ),
     by_street_zip AS ({lookup('street_key, zip5')}),
     by_street     AS ({lookup('street_key')}),
