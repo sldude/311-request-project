@@ -9,6 +9,11 @@ Reads connection settings from .env (see .env.example), then:
    dashboard. It may read every table in schema public, including tables
    created later, but cannot change anything.
 4. connects as the read-only user to prove it can log in and cannot create tables
+5. (Stage 8) creates the sync_log table and a limited login role for the
+   scheduled API update (GitHub Actions): it may read neighborhoods and
+   read/write the request tables and sync_log, but cannot create, drop or
+   alter anything. Grants on the request tables are applied only once they
+   exist (after load_db.py), so re-run this script after the first load.
 
 Safe to re-run: every step checks before it acts.
 
@@ -24,7 +29,33 @@ from dotenv import load_dotenv
 from psycopg import sql
 
 ROOT = Path(__file__).resolve().parent.parent
-REQUIRED = ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD", "DASHBOARD_USER", "DASHBOARD_PASSWORD"]
+REQUIRED = ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD", "DASHBOARD_USER", "DASHBOARD_PASSWORD",
+            "PIPELINE_USER", "PIPELINE_PASSWORD"]
+
+# Same definition the update script uses (kept here so setup can create it up front).
+SYNC_LOG_DDL = """
+CREATE TABLE IF NOT EXISTS sync_log (
+    run_id        serial PRIMARY KEY,
+    started_at    timestamptz NOT NULL,
+    finished_at   timestamptz NOT NULL,
+    mode          text NOT NULL,
+    since         timestamptz,
+    fetched       integer NOT NULL,
+    inserted      integer NOT NULL,
+    updated       integer NOT NULL,
+    moved         integer NOT NULL
+)"""
+
+# What the scheduled update needs, and nothing more.
+PIPELINE_GRANTS = {
+    None: ["GRANT CONNECT, TEMPORARY ON DATABASE {db} TO {u}",   # TEMPORARY: its staging table
+           "GRANT USAGE ON SCHEMA public TO {u}"],
+    "neighborhoods": ["GRANT SELECT ON neighborhoods TO {u}"],
+    "requests": ["GRANT SELECT, INSERT, UPDATE ON requests TO {u}"],
+    "requests_no_location": ["GRANT SELECT, INSERT, UPDATE, DELETE ON requests_no_location TO {u}"],
+    "sync_log": ["GRANT SELECT, INSERT ON sync_log TO {u}",
+                 "GRANT USAGE ON SEQUENCE sync_log_run_id_seq TO {u}"],
+}
 
 
 def connect(user: str, password: str, dbname: str | None = None) -> psycopg.Connection:
@@ -81,6 +112,37 @@ def main() -> None:
         else:
             ro.execute("DROP TABLE _ro_write_test")
             raise SystemExit(f"{ro_user} was able to create a table; it should be read-only")
+
+    setup_pipeline_role(db)
+
+
+def setup_pipeline_role(db: str) -> None:
+    user, pw = os.environ["PIPELINE_USER"], os.environ["PIPELINE_PASSWORD"]
+    with connect(os.environ["PGUSER"], os.environ["PGPASSWORD"]) as con:
+        con.execute(SYNC_LOG_DDL)
+        exists = con.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (user,)).fetchone()
+        verb = "ALTER" if exists else "CREATE"
+        con.execute(sql.SQL(verb + " ROLE {} LOGIN PASSWORD {}").format(sql.Identifier(user), sql.Literal(pw)))
+        skipped = []
+        for table, stmts in PIPELINE_GRANTS.items():
+            if table and not con.execute("SELECT to_regclass(%s)", (f"public.{table}",)).fetchone()[0]:
+                skipped.append(table)
+                continue
+            for stmt in stmts:
+                con.execute(sql.SQL(stmt).format(db=sql.Identifier(db), u=sql.Identifier(user)))
+        print(f"pipeline    : {'updated' if exists else 'created'} role {user}"
+              + (f" (tables not loaded yet, re-run after load_db.py: {', '.join(skipped)})" if skipped else ""))
+
+    with connect(user, pw) as w:
+        n = w.execute("SELECT count(*) FROM sync_log").fetchone()[0]
+        print(f"login check : {user} connected OK, reads sync_log ({n} runs)")
+        try:
+            w.execute("CREATE TABLE _pw_write_test (x int)")
+        except psycopg.errors.InsufficientPrivilege:
+            print(f"write check : {user} cannot create tables (expected)")
+        else:
+            w.execute("DROP TABLE _pw_write_test")
+            raise SystemExit(f"{user} was able to create a table; it should only read/write existing tables")
 
 
 if __name__ == "__main__":

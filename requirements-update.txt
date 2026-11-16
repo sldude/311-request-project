@@ -1,0 +1,7 @@
+# Minimal dependencies for the scheduled API update (pipeline/update_from_api.py),
+# installed by .github/workflows/update-311.yml. Pinned to the versions tested locally.
+duckdb==2.0.0
+pandas==3.1.0
+psycopg[binary]==3.3.7
+requests==2.34.2
+python-dotenv==1.2.4

@@ -45,6 +45,7 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fill_locations  # noqa: E402
 import standardize  # noqa: E402
+from db_setup import SYNC_LOG_DDL  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 API_URL = ("https://services1.arcgis.com/UWYHeuuJISiGmgXx/arcgis/rest/services/"
@@ -61,18 +62,6 @@ OUT_FIELDS = ["RowID"] + API_DATE_FIELDS + API_TEXT_FIELDS
 # Columns kept from a request's earlier location when the API sends it without one.
 LOCATION_COLS = {"latitude", "longitude", "location_source", "nsa_id"}
 
-SYNC_LOG_DDL = """
-CREATE TABLE IF NOT EXISTS sync_log (
-    run_id        serial PRIMARY KEY,
-    started_at    timestamptz NOT NULL,
-    finished_at   timestamptz NOT NULL,
-    mode          text NOT NULL,           -- 'window' or 'full'
-    since         timestamptz,             -- window start (NULL for full)
-    fetched       integer NOT NULL,
-    inserted      integer NOT NULL,        -- new rows (both tables)
-    updated       integer NOT NULL,        -- changed rows (both tables)
-    moved         integer NOT NULL         -- no_location -> requests
-)"""
 
 
 # ---------------------------------------------------------------- database
@@ -283,7 +272,8 @@ def main() -> None:
 
     started = dt.datetime.now(dt.timezone.utc)
     pg = connect()
-    pg.execute(SYNC_LOG_DDL)
+    if not pg.execute("SELECT to_regclass('public.sync_log')").fetchone()[0]:
+        pg.execute(SYNC_LOG_DDL)  # normally created by db_setup.py (the limited role can't create tables)
 
     if args.full:
         since, where = None, "1=1"
