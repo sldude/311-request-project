@@ -72,7 +72,11 @@ def street_key_sql(col: str) -> str:
     )
 
 
-def build_sql() -> str:
+def build_sql(source: str | None = None) -> str:
+    """SQL that fills locations. `source` is anything usable after FROM with
+    standardized rows; default = standardized.parquet. Stage 8 passes new API
+    rows plus reference rows (known locations) fetched from the database."""
+    source = source or f"'{IN_PATH.as_posix()}'"
     zip_from_address = r"nullif(regexp_extract(address, '(\d{5})(-\d{4})?\s*$', 1), '')"
     zip_from_column = r"CASE WHEN regexp_matches(zip_code, '^\d{5}') THEN left(zip_code, 5) END"
     placeholder = "(latitude = round(latitude) AND longitude = round(longitude))"
@@ -105,7 +109,7 @@ def build_sql() -> str:
         SELECT * REPLACE (
             CASE WHEN {placeholder} THEN NULL ELSE latitude END AS latitude,
             CASE WHEN {placeholder} THEN NULL ELSE longitude END AS longitude)
-        FROM '{IN_PATH.as_posix()}'
+        FROM {source}
     ),
     keyed AS (
         SELECT *,

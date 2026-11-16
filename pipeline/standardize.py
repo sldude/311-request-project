@@ -13,11 +13,15 @@ What this does
     - 'M/D/YYYY h:mm:ss AM'   (2010-2025): Baltimore local time -> UTC
     - 'YYYY/MM/DD HH:MM:SS+00' (2026):    labeled UTC, BUT see below
 * 2026 timestamp bug: from about 2026-08-16 the source system writes
-  Baltimore local time while labeling it "+00". It happens per record (all
-  dates in a record follow one convention) and no field marks it. Rule
+  times shifted to UTC minus a FIXED 5 hours (Eastern Standard Time all
+  year, no daylight saving) while labeling them "+00". It happens per record
+  (all dates in a record follow one convention) and no field marks it. Rule
   (chosen in Stage 2, ~90% accurate where it can be checked): if a record's
-  latest date is on/after SWITCH_DATE, its labels are treated as local time
-  and converted to real UTC, and ts_suspect = true.
+  latest date is on/after SWITCH_DATE, its labels get +5 hours to recover
+  real UTC, and ts_suspect = true.
+  (Stage 8 showed the offset is a fixed 5 h, not America/New_York local time:
+  records whose CSV labels were true UTC came back from the API exactly 5.0 h
+  earlier, summer dates included.)
 * Normalizes police_district capitalization (NORTHERN / Northern -> Northern).
 
 Usage:
@@ -34,8 +38,9 @@ IN_GLOB = (ROOT / "data" / "interim" / "raw_parquet" / "*.parquet").as_posix()
 OUT_PATH = ROOT / "data" / "interim" / "standardized.parquet"
 
 LOCAL_TZ = "America/New_York"
-# From this (labeled) date on, the source writes local time labeled as UTC.
+# From this (labeled) date on, the source writes UTC-5h (fixed, no DST) labeled as UTC.
 SWITCH_DATE = "2026-08-16"
+SUSPECT_OFFSET = "INTERVAL 5 HOUR"
 
 OLD_FMT = "%m/%d/%Y %I:%M:%S %p"   # 3/24/2010 7:21:00 AM   (local, no tz)
 NEW_FMT = "%Y/%m/%d %H:%M:%S%z"    # 2026/01/03 14:29:00+00 (labeled UTC)
@@ -69,7 +74,11 @@ def clean(col: str) -> str:
     return f"nullif(trim({col}), '')"
 
 
-def build_sql() -> str:
+def build_sql(source: str | None = None) -> str:
+    """SQL for the standardized table. `source` is anything usable after FROM
+    with the raw (all-text) source columns; default = the raw CSV parquet files.
+    Stage 8 passes a table of API rows converted to the same text layout."""
+    source = source or f"read_parquet('{IN_GLOB}', union_by_name = true)"
     # Step 1: clean text and parse dates "as labeled" (naive wall-clock values).
     parsed = []
     for raw, new in DATE_COLS.items():
@@ -88,22 +97,23 @@ def build_sql() -> str:
     latest = "greatest(" + ", ".join(f"coalesce({w}, TIMESTAMP '1900-01-01')" for w in wall) + ")"
 
     # Step 3: convert each date to a real UTC TIMESTAMPTZ.
-    #   old format            -> wall clock is local time
-    #   new format, suspect   -> wall clock is local time (mislabeled)
+    #   old format            -> wall clock is local time (with daylight saving)
+    #   new format, suspect   -> wall clock is UTC - 5 h fixed (mislabeled)
     #   new format, fine      -> wall clock is UTC
     final_dates = []
     for new in DATE_COLS.values():
         final_dates.append(
             f"""CASE
                   WHEN {new}_wall IS NULL THEN NULL
-                  WHEN NOT {new}_is_new_fmt OR ts_suspect THEN timezone('{LOCAL_TZ}', {new}_wall)
+                  WHEN NOT {new}_is_new_fmt THEN timezone('{LOCAL_TZ}', {new}_wall)
+                  WHEN ts_suspect THEN timezone('UTC', {new}_wall + {SUSPECT_OFFSET})
                   ELSE timezone('UTC', {new}_wall)
                 END AS {new}"""
         )
 
     return f"""
     WITH src AS (
-        SELECT * FROM read_parquet('{IN_GLOB}', union_by_name = true)
+        SELECT * FROM {source}
     ),
     step1 AS (
         SELECT
